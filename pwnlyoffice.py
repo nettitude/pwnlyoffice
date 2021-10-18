@@ -29,7 +29,7 @@ def process_fileparts( txt ):
   outfile = os.path.join(tmpdir,'document.docx')
   print('Attempting to convert ',infile,'to',outfile)
   subprocess.check_output(['x2t/x2t',infile,outfile])
-  subprocess.check_output(['open',outfile])
+  # subprocess.check_output(['open',outfile])
 
 class WsClient():
 
@@ -114,8 +114,12 @@ class WsClient():
       "current":0
     })
 
-    data = b'\x1e\x00\x00\x00' + '_macrosGlobalId'.encode('utf16') + b'\x01\x00\x00\x00\x00\x00\x00' +len(payload).to_bytes(2,byteorder='big')+b'\x00\x00' +payload.encode('utf16')
+    print('Payload length:', len(payload))
+
+    data = b'\x1e\x00\x00\x00\x5f\x00\x6d\x00\x61\x00\x63\x00\x72\x00\x6f\x00\x73\x00\x47\x00\x6c\x00\x6f\x00\x62\x00\x61\x00\x6c\x00\x49\x00\x64\x00\x01\x00\x00\x00\x00\x00\x00\x00' +(2 * len(payload)).to_bytes(2,byteorder='little')+b'\x00\x00' + bytes(payload, 'utf16')[2:] + b'\x00\x00\x00\x00'
+    print( data )
     changes = [str(len(data))+';'+base64.b64encode(data).decode('utf8')]
+    print(changes)
     self.save_changes( changes )
 
 

@@ -1,3 +1,3 @@
 (function(){
-alert(1);
-})
+alert("I am an injected alert box!");
+})();
