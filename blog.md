@@ -1,4 +1,6 @@
-# Exploiting Onlyoffice Web Sockets for Remote Code Execution
+# Exploiting ONLYOFFICE Web Sockets for Remote Code Execution
+
+## Encountering OnlyOffice
 
 About 18 months ago, I was conducting a pentest of a document management platform. It was designed with the goal of providing a secure document storage and sharing solution for some high impact use cases. In order to achieve a reliable MS Office document editing experience, the system was using [ONLYOFFICE](https://www.onlyoffice.com) as a plugin, resulting in (in my opinion) a slicker and more reliable editing experience than even the Office 365 web apps can manage.
 
@@ -54,6 +56,8 @@ Elsewhere in the system I had identified a method of reflecting a cross site scr
 
 In terms of that pentest, this was quite satisfactory to make a judgement on the security posture of the overall system and was all that could be investigated within the timeframe available. OnlyOffice had piqued my interest though. I decided to pull at the thread a bit more and see if this was an implementation issue or something a bit more widespread.
 
+## Pulling at the Thread
+
 With the original document management application now out of scope, I needed another testbed which used OnlyOffice as an editing module underneath its own authentication model. I quickly found a [Docker compose configuration created by OnlyOffice](https://github.com/ONLYOFFICE/docker-onlyoffice-nextcloud) to implement OnlyOffice as the editor for the Nextcloud document management system. With a few tweaks to the original `downloaddoc.py` script, I was able to extract documents from Nextcloud through OnlyOffice. What else can you do through the WebSocket endpoint?
 
 I explored the functionality of the document editor and found that basically all actions that are performed against the document are done through a WebSocket message, even down to the position of the cursor on the page. I looked for a few interesting features and found that OnlyOffice document editor features its own built-in chat client so that you can chat with people while working on the document that you're all looking at. That is very cool, but if we can connect to the WebSocket unauthenticated, how does it know what name to display in the chat message? It's simple, it's taken from the first message sent to the WebSocket, type "`auth`".
@@ -71,6 +75,8 @@ and in the UI...
 ![Apparently legitimate chat message](img/ui_chat.png)
 
 OnlyOffice *does* feature protections against this kind of unauthenticated connection to its WebSocket endpoints, but they are not enabled by default. JWT signing is possible, however, also by default the signing key is the word "`secret`". This means that even if JWT signing is enabled, unless the default key is changed, it is still trivial to connect to the WebSocket unauthenticated. I looked at where else cyptographic signing might rely on a weak default key and indeed the MD5 signed URL which the editor downloads from is signed using the default string "`verysecretstring`". This means that with a known document id I could download directly from the server without even needing to connect to the WebSocket.
+
+## Escalating Privileges
 
 This is all good fun, but when we're targeting an organisation we're usually looking for more of a foothold than simply social engineering them. What we need is a method of pivoting out of the OnlyOffice document editor and into the wider document management service (in this instance, NextCloud). NextCloud modules are deployed in the same origin as NextCloud itself, so hopefully a nice breakout method would involve finding cross site scripting in OnlyOffice which could be executed against NextCloud. I didn't have to look far.
 
@@ -120,6 +126,8 @@ So that works. Let's use it to get admin on NextCloud. In NextCloud you have to 
 and in the user management area, our admin is created for us:
 
 ![Admin created](img/admin_created.png)
+
+## Exploiting the Document Converter
 
 Now we're getting somewhere, if we know a document id it is feasible that we can poison a document and then get admin on a target's document management system. We still have to know a document id though, and these tend to be pretty hard to guess. What else will the WebSocket let us do? I noticed that when you connect to the WebSocket in a normal connection, the document server is provided a signed URL for the location of the **original document**. What can we do with that?
 
@@ -252,7 +260,18 @@ In total, 6 CVEs were generated from this research:
 5. CVE-2021-43446: XSS in macros
 6. CVE-2021-43449: SSRF in "auth" websocket command
 
-In addition, I logged a bug report with NextCloud's HackerOne programme, however the 30 minute window with which you can carry out admin actions without supplying your password was deemed to be functionality as intended.
+In addition, I logged a bug report with NextCloud's HackerOne program regarding the ability to create a new admin without supplying a valid admin password, however the 30 minute window with which you can carry out admin actions without supplying your password was deemed to be functionality as intended.
+
+## Remediation
+
+At the time of writing, OnlyOffice does not have a version available which is patched for these vulnerabilities. If you are running OnlyOffice in any capacity, you will need to mitigate against these vulnerabilities as follows:
+
+1. Enable JWT signed WebSocket commands and **ensure that a long, randomly generated key is used**: <https://api.onlyoffice.com/editors/signature/>
+2. Set a long, randomly generated key for download URL signing: <https://api.onlyoffice.com/editors/nextcloud>
+3. Disable the Macros plugin: <https://api.onlyoffice.com/editors/config/editor/customization#macros>
+4. Ensure that OnlyOffice document server is separated from all other non-essential systems at the network layer. i.e. document server should not be able to call out to the external Internet, or make internal calls to anything other than the intended document management system. It should especially not be able to contact the IP address `169.254.169.254` if you are hosting OnlyOffice in a cloud environment.
+5. For all OnlyOffice containers, ensure that the user which the web service is running as (e.g. `ds`) can only write to the temp folder. In particular, ensure that it cannot write to `/var/www/onlyoffice`, or wherever your document server is installed.
+6. Do not allow untrusted documents to be inserted directly into OnlyOffice, e.g. through a publicly available document upload portal.
 
 ## Timeline
 
