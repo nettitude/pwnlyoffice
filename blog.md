@@ -1,4 +1,4 @@
-# Exploiting ONLYOFFICE Web Sockets for Remote Code Execution
+# Exploiting ONLYOFFICE Web Sockets for Unauthenticated Remote Code Execution
 
 ## Encountering OnlyOffice
 
@@ -269,9 +269,10 @@ At the time of writing, OnlyOffice does not have a version available which is pa
 1. Enable JWT signed WebSocket commands and **ensure that a long, randomly generated key is used**: <https://api.onlyoffice.com/editors/signature/>
 2. Set a long, randomly generated key for download URL signing: <https://api.onlyoffice.com/editors/nextcloud>
 3. Disable the Macros plugin: <https://api.onlyoffice.com/editors/config/editor/customization#macros>
-4. Ensure that OnlyOffice document server is separated from all other non-essential systems at the network layer. i.e. document server should not be able to call out to the external Internet, or make internal calls to anything other than the intended document management system. It should especially not be able to contact the IP address `169.254.169.254` if you are hosting OnlyOffice in a cloud environment.
-5. For all OnlyOffice containers, ensure that the user which the web service is running as (e.g. `ds`) can only write to the temp folder. In particular, ensure that it cannot write to `/var/www/onlyoffice`, or wherever your document server is installed.
-6. Do not allow untrusted documents to be inserted directly into OnlyOffice, e.g. through a publicly available document upload portal.
+4. Disable the "chat" plugin: <https://api.onlyoffice.com/editors/config/editor/customization#chat>
+5. Ensure that OnlyOffice document server is separated from all other non-essential systems at the network layer. i.e. document server should not be able to call out to the external Internet, or make internal calls to anything other than the intended document management system. It should especially not be able to contact the IP address `169.254.169.254` if you are hosting OnlyOffice in a cloud environment.
+6. For all OnlyOffice containers, ensure that the user which the web service is running as (e.g. `ds`) can only write to the temp folder. In particular, ensure that it cannot write to `/var/www/onlyoffice`, or wherever your document server is installed.
+7. Do not allow untrusted documents to be inserted directly into OnlyOffice, e.g. through a publicly available document upload portal.
 
 ## Timeline
 

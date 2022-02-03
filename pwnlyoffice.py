@@ -266,6 +266,7 @@ class WsClient():
 
   def chat( self ):
     print('\nChat mode\n=========\nType messages, ENTER to send\n')
+    self.output = True
     self.get_messages()
     while self.ws.connected:
       msg = input()
