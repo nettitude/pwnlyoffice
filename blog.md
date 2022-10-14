@@ -147,9 +147,13 @@ I followed the source code of the document converter to understand how it treate
 
 > An issue was discovered in ONLYOFFICE Document Server 5.5.0. An attacker can craft a malicious .docx file, and exploit the unzip function to rewrite a binary and remotely execute code on a victim's server.
 
+## Arbitrary File Write
+
 Always do a bit of research first, kids! Surprisingly, it doesn't look like there was much of an attempt to correct this vulnerability. It's a fairly classic path traversal flaw at its core. MS Office formats (after 2007) are simply zip files with a standard file structure containing XML files and anything else that is embedded such as images. The document converter used by OnlyOffice converts an MS Office file and extracts it to a temporary location, writing any files within it out to a location **relative to that temp directory**. After the conversion is complete, the temp directory is deleted, but crucially if a file within the zip has path traversal characters ("../"), these can be used to write to any location on the document server which is writable by the web server.
 
 I tested this out by taking a legitimate DOCX file and adding to it a small file with the path `../../../../../../../../../../tmp/test`. I hosted this on a local webserver and then prompted the document server to download it via the unauthenticated WebSocket. Sure enough, jumping into the Docker container running the document server, there was the file `test`, sitting in `/tmp/`.
+
+## Exploiting for Code Execution
 
 Now to exploit this. I thought quite a nice way of exploiting remote code execution would be to backdoor the document converter tool so that all of the command and control traffic could simply just flow over the same WebSocket channel that we were already using. This included the added bonus that it did not appear that WebSocket messages were being logged. I looked into the document converter, and the binary central to it all, called `x2t`. For some reason it wasn't possible to overwrite `x2t` itself during document conversion, so inside the Docker container for the document server I enumerated the dynamic libraries that `x2t` used or, more specifically, which binaries it was searching for and **not** finding in locations that I could write to using the path traversal vulnerability:
 
@@ -235,6 +239,8 @@ fi
 $SCRIPT_DIR/x2t.new $@
 ```
 
+## Putting it all together: Unauthenticated Remote Code Execution
+
 So, the full chain of exploits is as follows:
 
 1. Connect to the WebSocket without authentication
@@ -251,6 +257,8 @@ And the SQL shell, being used to extract a list of valid document ids:
 
 ![SQL Shell](img/sql_shell.png)
 
+## CVEs Assigned
+
 In total, 6 CVEs were generated from this research:
 
 1. CVE-2021-43447: Unauthenticated Websocket
@@ -260,11 +268,13 @@ In total, 6 CVEs were generated from this research:
 5. CVE-2021-43446: XSS in macros
 6. CVE-2021-43449: SSRF in "auth" websocket command
 
-In addition, I logged a bug report with NextCloud's HackerOne program regarding the ability to create a new admin without supplying a valid admin password, however the 30 minute window with which you can carry out admin actions without supplying your password was deemed to be functionality as intended.
+In addition, I logged a bug report with [NextCloud](https://nextcloud.com/)'s [HackerOne program](https://hackerone.com/nextcloud) regarding the ability to create a new admin without supplying a valid admin password, however the 30 minute window with which you can carry out admin actions without supplying your password was deemed to be functionality as intended.
 
 ## Remediation
 
-At the time of writing, OnlyOffice does not have a version available which is patched for these vulnerabilities. If you are running OnlyOffice in any capacity, you will need to mitigate against these vulnerabilities as follows:
+If at all possible, update to version 7.2 of OnlyOffice.
+
+If an upgrade is for any reason not possible, you will need to mitigate against these vulnerabilities as follows:
 
 1. Enable JWT signed WebSocket commands and **ensure that a long, randomly generated key is used**: <https://api.onlyoffice.com/editors/signature/>
 2. Set a long, randomly generated key for download URL signing: <https://api.onlyoffice.com/editors/nextcloud>
@@ -282,3 +292,4 @@ At the time of writing, OnlyOffice does not have a version available which is pa
 - 2021-11-18: Application for 6 CVEs with MITRE
 - 2021-12-17: Assigned 6 CVEs
 - 2022-01-07: Produced PoC for automated unauthenticated RCE
+- 2022-09-26: Fix released in [version 7.2](https://www.onlyoffice.com/blog/2022/09/onlyoffice-docs-7-2/)
